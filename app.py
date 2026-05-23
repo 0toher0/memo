@@ -87,7 +87,6 @@ memo_text = st.text_area(
     label="내용",
     value=current_text,
     height=600,
-    max_chars=50000,
     placeholder="여기에 메모를 작성하세요. (최대 50,000자)",
     key=f"editor_{st.session_state.current}",
     label_visibility="collapsed",
