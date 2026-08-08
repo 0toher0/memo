@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    background: transparent;
+  }
+  #zone {
+    border: 2px dashed #c9ccd3;
+    border-radius: 10px;
+    padding: 16px;
+    min-height: 96px;
+    outline: none;
+    background: rgba(130, 130, 150, 0.06);
+    font-size: 14px;
+    line-height: 1.6;
+    color: #6b7280;
+    cursor: text;
+    transition: border-color .15s, background .15s;
+  }
+  #zone.focus { border-color: #ff4b4b; background: rgba(255, 75, 75, 0.06); }
+  #zone b { color: #ff4b4b; }
+  #status { margin-top: 8px; font-size: 12px; min-height: 18px; color: #8b8f98; }
+  #status.ok { color: #0f9d58; }
+  #status.err { color: #d93025; }
+  /* 측정용 무대 (화면 밖) — 실제 렌더링(.ma-table)과 같은 글꼴/여백으로 맞춰서
+     여기서 잰 열 너비가 그대로 재현되게 한다 */
+  #stage {
+    position: absolute; left: -100000px; top: 0;
+    width: 1600px; visibility: visible;
+  }
+  #stage table { border-collapse: collapse; table-layout: auto !important; width: auto !important; }
+  #stage table td, #stage table th {
+    padding: 3px 7px !important;
+    font-size: 13px !important;
+    font-family: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif !important;
+    white-space: nowrap !important;   /* 줄바꿈 없이 잰 폭 = 내용이 한 줄로 들어가는 폭 */
+  }
+</style>
+</head>
+<body>
+  <div id="zone" contenteditable="true" spellcheck="false">
+    <span id="hint">📋 여기를 클릭하고 <b>Ctrl+V</b> — 엑셀 표는 <b>표 서식 그대로</b>, 화면 캡쳐는 <b>이미지</b>로 붙습니다.</span>
+  </div>
+  <div id="status"></div>
+  <div id="stage" contenteditable="true"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var zone = document.getElementById("zone");
+  var stage = document.getElementById("stage");
+  var statusEl = document.getElementById("status");
+  var HINT = zone.innerHTML;
+
+  var MAX_ROWS = 400;
+  var MAX_COLS = 80;
+  var MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+
+  var counter = 0;
+  var tag = Math.random().toString(36).slice(2, 10);
+
+  // ---------- Streamlit component protocol ----------
+  function post(msg) {
+    msg.isStreamlitMessage = true;
+    window.parent.postMessage(msg, "*");
+  }
+  function setValue(v) {
+    post({ type: "streamlit:setComponentValue", value: v, dataType: "json" });
+  }
+  function setHeight() {
+    post({ type: "streamlit:setFrameHeight", height: document.body.scrollHeight + 10 });
+  }
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+  setHeight();
+  window.addEventListener("message", function (e) {
+    if (e.data && e.data.type === "streamlit:render") setHeight();
+  });
+  window.addEventListener("resize", setHeight);
+
+  function say(msg, cls) {
+    statusEl.textContent = msg || "";
+    statusEl.className = cls || "";
+    setHeight();
+  }
+  function resetZone() {
+    zone.innerHTML = HINT;
+    setHeight();
+  }
+
+  zone.addEventListener("focus", function () { zone.classList.add("focus"); });
+  zone.addEventListener("blur", function () { zone.classList.remove("focus"); resetZone(); });
+
+  // ---------- 색/테두리 유틸 ----------
+  function toHex(c) {
+    if (!c) return null;
+    c = c.trim();
+    if (c === "transparent") return null;
+    var m = c.match(/^rgba?\(([^)]+)\)$/i);
+    if (!m) return c.charAt(0) === "#" ? c : null;
+    var p = m[1].split(",").map(function (x) { return parseFloat(x.trim()); });
+    if (p.length > 3 && p[3] === 0) return null;
+    function h(n) { n = Math.max(0, Math.min(255, Math.round(n || 0))); return ("0" + n.toString(16)).slice(-2); }
+    return "#" + h(p[0]) + h(p[1]) + h(p[2]);
+  }
+  function borderOf(cs, side) {
+    var w = parseFloat(cs.getPropertyValue("border-" + side + "-width")) || 0;
+    var s = cs.getPropertyValue("border-" + side + "-style");
+    if (w <= 0 || s === "none" || s === "hidden") return null;
+    var col = toHex(cs.getPropertyValue("border-" + side + "-color")) || "#9aa0a6";
+    if (s === "double" && w < 3) s = "solid";
+    return Math.max(1, Math.round(w)) + "px " + s + " " + col;
+  }
+
+  // ---------- 셀 정보 추출 ----------
+  function readCell(cell) {
+    var cs = window.getComputedStyle(cell);
+    var text = (cell.innerText || "").replace(/ /g, " ").replace(/\s+$/g, "");
+    var o = { v: text };
+
+    var fw = cs.fontWeight;
+    if (fw === "bold" || fw === "bolder" || parseInt(fw, 10) >= 600) o.b = 1;
+    if (cs.fontStyle === "italic") o.i = 1;
+    if ((cs.textDecorationLine || "").indexOf("underline") >= 0) o.u = 1;
+
+    var bg = toHex(cs.backgroundColor);
+    if (bg && bg !== "#ffffff") o.bg = bg;
+    var fg = toHex(cs.color);
+    if (fg && fg !== "#000000" && fg !== "#000") o.fg = fg;
+
+    var al = cs.textAlign;
+    if (al && al !== "start" && al !== "left" && al !== "-webkit-auto") o.al = al;
+    var va = cs.verticalAlign;
+    if (va === "top" || va === "bottom") o.va = va;
+
+    var fs = parseFloat(cs.fontSize);
+    if (fs && Math.abs(fs - 14) > 1.5) o.fs = Math.round(fs);
+
+    var bt = borderOf(cs, "top"), br = borderOf(cs, "right"),
+        bb = borderOf(cs, "bottom"), bl = borderOf(cs, "left");
+    if (bt) o.bt = bt;
+    if (br) o.br = br;
+    if (bb) o.bb = bb;
+    if (bl) o.bl = bl;
+
+    if (cell.tagName === "TH") o.th = 1;
+    return o;
+  }
+
+  // ---------- 표 → grid ----------
+  function extractTable(table) {
+    var rows = Array.prototype.slice.call(table.rows);
+    if (!rows.length) return null;
+    var grid = [];
+    var taken = Object.create(null);
+    var maxc = 0;
+    var truncated = false;
+
+    function ensure(r, c) {
+      while (grid.length <= r) grid.push([]);
+      while (grid[r].length <= c) grid[r].push(null);
+    }
+
+    for (var r = 0; r < rows.length; r++) {
+      if (r >= MAX_ROWS) { truncated = true; break; }
+      var cells = rows[r].cells;
+      var c = 0;
+      while (grid.length <= r) grid.push([]);
+      for (var k = 0; k < cells.length; k++) {
+        while (taken[r + ":" + c]) c++;
+        if (c >= MAX_COLS) { truncated = true; break; }
+        var cell = cells[k];
+        var cs = Math.max(1, cell.colSpan || 1);
+        var rs = Math.max(1, cell.rowSpan || 1);
+        var info = readCell(cell);
+        if (cs > 1) info.cs = cs;
+        if (rs > 1) info.rs = rs;
+        ensure(r, c);
+        grid[r][c] = info;
+        for (var i = 0; i < rs; i++) {
+          for (var j = 0; j < cs; j++) {
+            taken[(r + i) + ":" + (c + j)] = 1;
+            if (i || j) ensure(r + i, c + j);
+          }
+        }
+        c += cs;
+        if (c > maxc) maxc = c;
+      }
+    }
+
+    for (var q = 0; q < grid.length; q++) {
+      while (grid[q].length < maxc) grid[q].push(null);
+      grid[q].length = maxc;
+    }
+    // 완전히 빈 표는 무시
+    var any = false;
+    for (var a = 0; a < grid.length && !any; a++)
+      for (var b2 = 0; b2 < grid[a].length; b2++)
+        if (grid[a][b2] && grid[a][b2].v) { any = true; break; }
+    if (!any) return null;
+
+    // 열 너비: 각 열마다 colspan=1 인 첫 anchor 셀의 실제 렌더 폭 사용
+    var widths = [];
+    for (var col = 0; col < maxc; col++) {
+      var w = null;
+      for (var row = 0; row < grid.length; row++) {
+        var cinfo = grid[row][col];
+        if (cinfo && !cinfo.cs) {                 // 가로 병합이 아닌 셀만 기준으로
+          var domCell = findDomCell(rows, row, col, grid);
+          if (domCell) {
+            var bw = Math.round(domCell.getBoundingClientRect().width) + 3;
+            if (bw > 0 && (w === null || bw > w)) w = bw;   // 열 안에서 가장 넓은 칸 기준
+          }
+        }
+      }
+      widths.push(w === null ? null : Math.min(420, Math.max(36, w)));
+    }
+
+    return { grid: grid, widths: widths, rows: grid.length, cols: maxc, truncated: truncated };
+  }
+
+  // grid 좌표 -> 실제 DOM 셀 찾기 (같은 행에서 순서대로 세어감)
+  function findDomCell(rows, r, c, grid) {
+    if (!rows[r]) return null;
+    var idx = 0;
+    for (var i = 0; i < c; i++) {
+      if (grid[r][i] !== null) idx++;
+    }
+    return rows[r].cells[idx] || null;
+  }
+
+  // ---------- HTML 정리 ----------
+  function stripForStorage(root) {
+    var clone = root.cloneNode(true);
+    var kill = clone.querySelectorAll("script,link,meta,iframe,object,embed,style");
+    for (var i = 0; i < kill.length; i++) kill[i].parentNode.removeChild(kill[i]);
+    var all = clone.querySelectorAll("*");
+    for (var j = 0; j < all.length; j++) {
+      var el = all[j];
+      var attrs = Array.prototype.slice.call(el.attributes);
+      for (var k = 0; k < attrs.length; k++) {
+        var n = attrs[k].name;
+        if (/^on/i.test(n) || n === "class" || n === "id") el.removeAttribute(n);
+      }
+      if (el.tagName === "IMG") {
+        var s = el.getAttribute("src") || "";
+        if (!/^data:image\//i.test(s) && !/^https:\/\//i.test(s)) el.parentNode.removeChild(el);
+      }
+      if (el.tagName === "A") el.setAttribute("rel", "noopener noreferrer");
+    }
+    return clone.innerHTML;
+  }
+
+  // 인라인 스타일을 계산값으로 굽기 (Word/PPT 텍스트용)
+  function inlineStyles(src, dst) {
+    var s = src.querySelectorAll("*");
+    var d = dst.querySelectorAll("*");
+    for (var i = 0; i < s.length && i < d.length; i++) {
+      var cs = window.getComputedStyle(s[i]);
+      var parts = [];
+      var fw = cs.fontWeight;
+      if (fw === "bold" || parseInt(fw, 10) >= 600) parts.push("font-weight:600");
+      if (cs.fontStyle === "italic") parts.push("font-style:italic");
+      var fg = toHex(cs.color);
+      if (fg && fg !== "#000000") parts.push("color:" + fg);
+      var bg = toHex(cs.backgroundColor);
+      if (bg && bg !== "#ffffff") parts.push("background-color:" + bg);
+      var fs = parseFloat(cs.fontSize);
+      if (fs && Math.abs(fs - 16) > 1.5) parts.push("font-size:" + Math.round(fs) + "px");
+      if ((cs.textDecorationLine || "").indexOf("underline") >= 0) parts.push("text-decoration:underline");
+      if (parts.length) d[i].setAttribute("style", parts.join(";"));
+    }
+  }
+
+  function newUid() {
+    counter += 1;
+    return tag + "-" + counter + "-" + Date.now();
+  }
+
+  // ---------- 붙여넣기 ----------
+  zone.addEventListener("paste", function (e) {
+    e.preventDefault();
+    var cd = e.clipboardData || window.clipboardData;
+    if (!cd) { say("클립보드를 읽을 수 없습니다.", "err"); return; }
+
+    // 1) 이미지 (화면 캡쳐, PPT 도형/차트 복사 등)
+    var file = null;
+    if (cd.items) {
+      for (var i = 0; i < cd.items.length; i++) {
+        var it = cd.items[i];
+        if (it.kind === "file" && it.type && it.type.indexOf("image/") === 0) {
+          file = it.getAsFile();
+          break;
+        }
+      }
+    }
+    if (file) {
+      if (file.size > MAX_IMAGE_BYTES) {
+        say("이미지가 너무 큽니다 (" + Math.round(file.size / 1048576) + "MB). 12MB 이하로 잘라서 붙여넣어 주세요.", "err");
+        return;
+      }
+      var fr = new FileReader();
+      fr.onload = function () {
+        var img = new Image();
+        img.onload = function () {
+          setValue({
+            uid: newUid(), kind: "image", mime: file.type,
+            data: String(fr.result), w: img.naturalWidth, h: img.naturalHeight,
+            bytes: file.size
+          });
+          say("🖼️ 이미지 붙여넣기 완료 (" + img.naturalWidth + "×" + img.naturalHeight + ")", "ok");
+          resetZone();
+        };
+        img.onerror = function () {
+          setValue({ uid: newUid(), kind: "image", mime: file.type, data: String(fr.result), bytes: file.size });
+          say("🖼️ 이미지 붙여넣기 완료", "ok");
+          resetZone();
+        };
+        img.src = String(fr.result);
+      };
+      fr.onerror = function () { say("이미지를 읽지 못했습니다.", "err"); };
+      fr.readAsDataURL(file);
+      return;
+    }
+
+    // 2) 서식 있는 HTML (엑셀 표 / Word / PPT 텍스트)
+    var html = "";
+    try { html = cd.getData("text/html") || ""; } catch (err) { html = ""; }
+    var plain = "";
+    try { plain = cd.getData("text/plain") || ""; } catch (err2) { plain = ""; }
+
+    if (html) {
+      stage.innerHTML = html;                  // 스타일이 적용된 상태로 렌더 (측정용)
+      var table = stage.querySelector("table");
+      if (table) {
+        var res = null;
+        try { res = extractTable(table); } catch (err3) { res = null; }
+        if (res) {
+          setValue({
+            uid: newUid(), kind: "table", grid: res.grid, widths: res.widths,
+            rows: res.rows, cols: res.cols, plain: plain
+          });
+          say("📊 표 붙여넣기 완료 (" + res.rows + "행 × " + res.cols + "열)" +
+              (res.truncated ? " — 크기가 커서 일부만 가져왔습니다." : ""), "ok");
+          stage.innerHTML = "";
+          resetZone();
+          return;
+        }
+      }
+      // 표가 아니면 서식 텍스트로
+      var box = document.createElement("div");
+      box.innerHTML = html;
+      stage.appendChild(box);
+      var frozen = box.cloneNode(true);
+      try { inlineStyles(box, frozen); } catch (err4) {}
+      var safe = stripForStorage(frozen);
+      stage.innerHTML = "";
+      if (safe && safe.replace(/<[^>]*>/g, "").trim()) {
+        setValue({ uid: newUid(), kind: "html", html: safe, plain: plain });
+        say("📝 서식 있는 텍스트 붙여넣기 완료", "ok");
+        resetZone();
+        return;
+      }
+    }
+
+    // 3) TSV (엑셀에서 복사했지만 HTML이 없는 경우) → 표로 복원
+    if (plain && plain.indexOf("\t") >= 0) {
+      var lines = plain.replace(/\r/g, "").split("\n");
+      while (lines.length && lines[lines.length - 1] === "") lines.pop();
+      var g = [], mx = 0;
+      for (var li = 0; li < lines.length && li < MAX_ROWS; li++) {
+        var cells = lines[li].split("\t").slice(0, MAX_COLS);
+        mx = Math.max(mx, cells.length);
+        g.push(cells.map(function (t) { return { v: t }; }));
+      }
+      for (var gi = 0; gi < g.length; gi++) while (g[gi].length < mx) g[gi].push(null);
+      setValue({ uid: newUid(), kind: "table", grid: g, widths: [], rows: g.length, cols: mx, plain: plain });
+      say("📊 표(탭 구분) 붙여넣기 완료 (" + g.length + "행 × " + mx + "열)", "ok");
+      resetZone();
+      return;
+    }
+
+    // 4) 일반 텍스트
+    if (plain.trim()) {
+      setValue({ uid: newUid(), kind: "text", text: plain });
+      say("📄 텍스트 붙여넣기 완료", "ok");
+      resetZone();
+      return;
+    }
+
+    say("붙여넣을 내용을 찾지 못했습니다.", "err");
+  });
+
+  // 파일 드래그&드롭(이미지)도 지원
+  zone.addEventListener("dragover", function (e) { e.preventDefault(); zone.classList.add("focus"); });
+  zone.addEventListener("dragleave", function () { zone.classList.remove("focus"); });
+  zone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    zone.classList.remove("focus");
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f || f.type.indexOf("image/") !== 0) { say("이미지 파일만 끌어놓을 수 있습니다.", "err"); return; }
+    if (f.size > MAX_IMAGE_BYTES) { say("이미지가 너무 큽니다.", "err"); return; }
+    var fr2 = new FileReader();
+    fr2.onload = function () {
+      setValue({ uid: newUid(), kind: "image", mime: f.type, data: String(fr2.result), bytes: f.size });
+      say("🖼️ 이미지 추가 완료", "ok");
+    };
+    fr2.readAsDataURL(f);
+  });
+
+  setTimeout(setHeight, 100);
+})();
+</script>
+</body>
+</html>
