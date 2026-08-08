@@ -11,23 +11,46 @@ import streamlit.components.v1 as components
 from . import _store
 from ._render import (
     TABLE_CSS,
+    apply_values,
     block_to_html,
     sanitize_html,
     table_to_csv_bytes,
     table_to_dataframe,
     table_to_html,
+    table_to_rows,
+    table_to_tsv,
     table_to_xlsx_bytes,
 )
 
-_FRONTEND_DIR = Path(__file__).parent / "_paste"
+_PASTE_DIR = Path(__file__).parent / "_paste"
+_TABLE_DIR = Path(__file__).parent / "_table"
 _component = None
+_table_component = None
 
 
 def _get_component():
     global _component
     if _component is None:
-        _component = components.declare_component("memo_attach_paste", path=str(_FRONTEND_DIR))
+        _component = components.declare_component("memo_attach_paste", path=str(_PASTE_DIR))
     return _component
+
+
+def _get_table_component():
+    global _table_component
+    if _table_component is None:
+        _table_component = components.declare_component("memo_attach_table", path=str(_TABLE_DIR))
+    return _table_component
+
+
+def table_view(payload: Dict[str, Any], key: str, caption: str = "") -> None:
+    """표를 서식 그대로 보여주고, 엑셀로 다시 복사할 수 있는 버튼을 함께 준다."""
+    _get_table_component()(
+        html=table_to_html(payload, wrap=False),
+        tsv=table_to_tsv(payload),
+        caption=caption,
+        key=key,
+        default=None,
+    )
 
 
 def _inject_css() -> None:
@@ -39,12 +62,15 @@ def _inject_css() -> None:
 # --------------------------------------------------------------------------- #
 # 붙여넣기 입력창
 # --------------------------------------------------------------------------- #
-def paste_box(key: str = "memo_attach_paste") -> Optional[Dict[str, Any]]:
+def paste_box(key: str = "memo_attach_paste", mode: str = "auto") -> Optional[Dict[str, Any]]:
     """
     붙여넣기 영역을 그리고, 새로 붙여넣은 값이 있을 때만 dict를 반환한다.
     (같은 값이 rerun 때마다 중복 반환되지 않도록 uid로 걸러준다)
+
+    mode: "auto" — 엑셀 표를 최우선으로 인식 (기본)
+          "image" — 무조건 그림으로 저장
     """
-    value = _get_component()(key=key, default=None)
+    value = _get_component()(key=key, mode=mode, default=None)
     if not isinstance(value, dict):
         return None
     uid = value.get("uid")
@@ -60,14 +86,17 @@ def paste_box(key: str = "memo_attach_paste") -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # 블록 렌더링
 # --------------------------------------------------------------------------- #
-def _render_block_body(block: Dict[str, Any], show_caption: bool = True) -> None:
+def _render_block_body(block: Dict[str, Any], show_caption: bool = True, copyable: bool = True) -> None:
     kind = block["kind"]
     cap = block.get("caption") or ""
 
     if kind == "table":
-        if show_caption and cap:
-            st.markdown(f'<div class="ma-cap">{cap}</div>', unsafe_allow_html=True)
-        st.markdown(table_to_html(block["payload"]), unsafe_allow_html=True)
+        if copyable:
+            table_view(block["payload"], key=f"ma_tv_{block['id']}", caption=cap if show_caption else "")
+        else:
+            if show_caption and cap:
+                st.markdown(f'<div class="ma-cap">{cap}</div>', unsafe_allow_html=True)
+            st.markdown(table_to_html(block["payload"]), unsafe_allow_html=True)
     elif kind == "image":
         p = block.get("file_path") or ""
         if p and Path(p).exists():
@@ -122,8 +151,21 @@ def attachment_panel(
     pkey = f"ma_paste_{key}"
 
     if show_paste_box:
-        st.markdown("##### 📎 엑셀 표 / 캡쳐 이미지 붙여넣기")
-        pasted = paste_box(key=pkey)
+        head_l, head_r = st.columns([3, 2])
+        with head_l:
+            st.markdown("##### 📎 엑셀 표 / 캡쳐 이미지 붙여넣기")
+        with head_r:
+            mode_label = st.radio(
+                "붙여넣기 방식",
+                ["표로 (엑셀·기본)", "이미지로"],
+                horizontal=True,
+                key=f"ma_mode_{key}",
+                label_visibility="collapsed",
+                help="엑셀은 복사할 때 표와 그림을 함께 클립보드에 넣습니다. "
+                     "기본은 '표로'이고, 화면 캡쳐처럼 그림으로 남기고 싶을 때만 '이미지로'를 고르세요.",
+            )
+        mode = "image" if mode_label.startswith("이미지") else "auto"
+        pasted = paste_box(key=pkey, mode=mode)
         if pasted:
             new_id = _store.add_block(memo_id, pasted)
             if new_id:
@@ -200,14 +242,42 @@ def attachment_panel(
                     st.rerun()
 
             if b["kind"] == "table":
-                with st.popover("데이터로 보기 / 계산", use_container_width=False):
-                    try:
-                        df = table_to_dataframe(b["payload"])
-                        st.dataframe(df, use_container_width=True)
-                        st.download_button(
-                            "CSV로 저장", table_to_csv_bytes(b["payload"]),
-                            file_name=f"표_{b['id']}.csv", mime="text/csv",
-                            key=f"ma_csv2_{b['id']}",
-                        )
-                    except Exception as exc:  # pragma: no cover
-                        st.warning(f"표를 데이터로 변환하지 못했습니다: {exc}")
+                _table_editor(b)
+
+
+def _table_editor(block: Dict[str, Any]) -> None:
+    """스프레드시트처럼 셀 값을 고칠 수 있는 편집기 (서식·병합은 그대로 유지)."""
+    import pandas as pd
+
+    if not st.toggle("✏️ 셀 값 편집 (스프레드시트처럼)", key=f"ma_edtog_{block['id']}"):
+        return
+
+    try:
+        rows = table_to_rows(block["payload"])
+        if not rows:
+            st.info("편집할 내용이 없습니다.")
+            return
+        df = pd.DataFrame(rows, columns=[f"{c + 1}열" for c in range(len(rows[0]))])
+        st.caption("값만 고칩니다. 색·굵기·테두리·병합 같은 서식은 그대로 유지됩니다. "
+                   "병합된 칸은 왼쪽 위 칸에만 값이 들어갑니다.")
+        edited = st.data_editor(
+            df, use_container_width=True, num_rows="fixed",
+            key=f"ma_ed_{block['id']}", height=min(560, 45 + 35 * len(rows)),
+        )
+        col_a, col_b, _ = st.columns([1, 1, 3])
+        with col_a:
+            if st.button("💾 표에 반영", key=f"ma_edsave_{block['id']}", type="primary",
+                         use_container_width=True):
+                new_rows = edited.astype(str).values.tolist()
+                payload = apply_values(block["payload"], new_rows)
+                _store.update_payload(block["id"], payload)
+                st.toast("표를 저장했습니다.", icon="✅")
+                st.rerun()
+        with col_b:
+            st.download_button(
+                "CSV로 저장", table_to_csv_bytes(block["payload"]),
+                file_name=f"표_{block['id']}.csv", mime="text/csv",
+                key=f"ma_csv2_{block['id']}", use_container_width=True,
+            )
+    except Exception as exc:  # pragma: no cover
+        st.warning(f"표를 데이터로 변환하지 못했습니다: {exc}")

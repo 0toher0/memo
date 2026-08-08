@@ -183,6 +183,16 @@ def counts_by_memo() -> Dict[str, int]:
     return {r["memo_id"]: int(r["c"]) for r in rows}
 
 
+def update_payload(block_id: int, payload: Dict[str, Any]) -> None:
+    """표 내용을 편집했을 때 저장."""
+    _ensure()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE blocks SET payload = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), block_id),
+        )
+
+
 def update_caption(block_id: int, caption: str) -> None:
     _ensure()
     with _connect() as conn:

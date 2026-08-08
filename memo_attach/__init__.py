@@ -36,9 +36,11 @@ from ._store import (  # noqa: F401
     move_block,
     rename_memo,
     update_caption,
+    update_payload,
 )
 from ._render import (  # noqa: F401
     TABLE_CSS,
+    apply_values,
     block_to_html,
     memo_to_html,
     memo_to_markdown,
@@ -46,12 +48,14 @@ from ._render import (  # noqa: F401
     table_to_dataframe,
     table_to_html,
     table_to_rows,
+    table_to_tsv,
     table_to_xlsx_bytes,
 )
 from ._ui import (  # noqa: F401
     attachment_panel,
     paste_box,
     render_attachments,
+    table_view,
 )
 
 
@@ -80,8 +84,10 @@ __all__ = [
     "update_caption",
     "export_html",
     "export_markdown",
+    "table_view",
     "table_to_dataframe",
     "table_to_csv_bytes",
+    "table_to_tsv",
     "table_to_xlsx_bytes",
     "db_path",
     "files_dir",

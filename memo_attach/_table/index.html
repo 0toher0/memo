@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  }
+  #bar { display: flex; gap: 6px; align-items: center; margin: 0 0 6px 0; flex-wrap: wrap; }
+  .btn {
+    font-size: 12.5px; padding: 4px 10px; border-radius: 6px;
+    border: 1px solid #d0d3d8; background: #fff; color: #262730;
+    cursor: pointer; line-height: 1.5; white-space: nowrap;
+  }
+  .btn:hover { border-color: #ff4b4b; color: #ff4b4b; }
+  .btn:active { transform: translateY(1px); }
+  #msg { font-size: 12px; color: #0f9d58; margin-left: 4px; }
+  #cap { font-size: 12px; color: #6b7280; margin: 0 0 4px 0; }
+
+  #wrap { overflow-x: auto; padding-bottom: 4px; }
+  table.ma-table {
+    border-collapse: collapse; font-size: 13px; background: #fff; color: #111;
+    font-family: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  }
+  table.ma-table td, table.ma-table th {
+    border: 1px solid #d0d3d8; padding: 3px 7px;
+    white-space: pre-wrap; overflow-wrap: break-word; vertical-align: middle;
+  }
+  table.ma-table th { background: #f2f3f5; font-weight: 600; }
+  #stage { position: absolute; left: -100000px; top: 0; }
+</style>
+</head>
+<body>
+  <div id="cap"></div>
+  <div id="bar">
+    <button class="btn" id="b-excel" title="다른 엑셀 파일에 Ctrl+V 하면 서식 그대로 들어갑니다">📋 엑셀로 복사 (서식 유지)</button>
+    <button class="btn" id="b-tsv" title="메모장·TBM 양식 등에 붙여넣을 때">📄 텍스트(탭 구분)로 복사</button>
+    <span id="msg"></span>
+  </div>
+  <div id="wrap"></div>
+  <div id="stage"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var wrap = document.getElementById("wrap");
+  var capEl = document.getElementById("cap");
+  var msg = document.getElementById("msg");
+  var stage = document.getElementById("stage");
+
+  var tableHtml = "";
+  var tsv = "";
+
+  function post(m) { m.isStreamlitMessage = true; window.parent.postMessage(m, "*"); }
+  function setHeight() {
+    post({ type: "streamlit:setFrameHeight", height: document.body.scrollHeight + 8 });
+  }
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var a = e.data.args || {};
+    if (typeof a.html === "string" && a.html !== tableHtml) {
+      tableHtml = a.html;
+      wrap.innerHTML = tableHtml;
+    }
+    if (typeof a.tsv === "string") tsv = a.tsv;
+    if (typeof a.caption === "string") {
+      capEl.textContent = a.caption;
+      capEl.style.display = a.caption ? "block" : "none";
+    }
+    setHeight();
+  });
+
+  function flash(text) {
+    msg.textContent = text;
+    setTimeout(function () { msg.textContent = ""; }, 2500);
+  }
+
+  // 사용자가 버튼을 누른 '그 순간'에만 클립보드를 건드린다 (권한 필요 없음)
+  function copyBoth(html, plain) {
+    var handler = function (ev) {
+      if (html) ev.clipboardData.setData("text/html", html);
+      ev.clipboardData.setData("text/plain", plain || "");
+      ev.preventDefault();
+    };
+    document.addEventListener("copy", handler, true);
+    var ok = false;
+    try {
+      // execCommand('copy') 는 선택 영역이 있어야 동작하는 브라우저가 있어서 더미를 만든다
+      stage.textContent = " ";
+      var range = document.createRange();
+      range.selectNodeContents(stage);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      ok = document.execCommand("copy");
+      sel.removeAllRanges();
+      stage.textContent = "";
+    } catch (err) {
+      ok = false;
+    }
+    document.removeEventListener("copy", handler, true);
+    return ok;
+  }
+
+  document.getElementById("b-excel").addEventListener("click", function () {
+    var full = '<html><body>' + tableHtml + '</body></html>';
+    if (copyBoth(full, tsv)) flash("✅ 복사됨 — 엑셀에서 Ctrl+V 하세요");
+    else flash("복사 실패 — 표를 직접 드래그해서 Ctrl+C 해주세요");
+  });
+
+  document.getElementById("b-tsv").addEventListener("click", function () {
+    if (copyBoth(null, tsv)) flash("✅ 텍스트로 복사됨");
+    else flash("복사 실패 — 표를 직접 드래그해서 Ctrl+C 해주세요");
+  });
+
+  setTimeout(setHeight, 80);
+  window.addEventListener("resize", setHeight);
+})();
+</script>
+</body>
+</html>

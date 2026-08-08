@@ -76,10 +76,10 @@ def _cell_style(cell: Dict[str, Any]) -> str:
     return ";".join(s)
 
 
-def table_to_html(payload: Dict[str, Any], caption: str = "") -> str:
+def table_to_html(payload: Dict[str, Any], caption: str = "", wrap: bool = True) -> str:
     grid = payload.get("grid") or []
     widths = payload.get("widths") or []
-    parts: List[str] = ['<div class="ma-wrap">']
+    parts: List[str] = ['<div class="ma-wrap">'] if wrap else []
     if caption:
         parts.append(f'<div class="ma-cap">{_html.escape(caption)}</div>')
     parts.append('<table class="ma-table">')
@@ -107,12 +107,18 @@ def table_to_html(payload: Dict[str, Any], caption: str = "") -> str:
             text = _html.escape(str(cell.get("v", "")))
             parts.append(f"<{tag}{attrs}>{text}</{tag}>")
         parts.append("</tr>")
-    parts.append("</table></div>")
+    parts.append("</table></div>" if wrap else "</table>")
     return "".join(parts)
 
 
-def table_to_rows(payload: Dict[str, Any]) -> List[List[str]]:
-    """병합 셀을 값 복제로 펴서 2차원 문자열 배열로."""
+def table_to_rows(payload: Dict[str, Any], fill_merged: bool = False) -> List[List[str]]:
+    """
+    2차원 문자열 배열로 편다.
+
+    fill_merged=False (기본) — 병합 셀은 왼쪽 위 칸에만 값을 두고 나머지는 빈칸.
+                               엑셀이 실제로 동작하는 방식이라, 다시 엑셀에 붙일 때 자연스럽다.
+    fill_merged=True         — 병합 범위 전체에 같은 값을 채운다 (표를 데이터로 분석할 때).
+    """
     grid = payload.get("grid") or []
     if not grid:
         return []
@@ -123,6 +129,10 @@ def table_to_rows(payload: Dict[str, Any]) -> List[List[str]]:
             if cell is None:
                 continue
             v = str(cell.get("v", ""))
+            if not fill_merged:
+                if c < ncols:
+                    out[r][c] = v
+                continue
             rs = int(cell.get("rs", 1) or 1)
             cs = int(cell.get("cs", 1) or 1)
             for i in range(rs):
@@ -135,7 +145,7 @@ def table_to_rows(payload: Dict[str, Any]) -> List[List[str]]:
 def table_to_dataframe(payload: Dict[str, Any], header: bool = True):
     import pandas as pd
 
-    rows = table_to_rows(payload)
+    rows = table_to_rows(payload, fill_merged=True)
     if not rows:
         return pd.DataFrame()
     if header and len(rows) > 1:
@@ -152,6 +162,29 @@ def table_to_dataframe(payload: Dict[str, Any], header: bool = True):
             uniq.append(name)
         return pd.DataFrame(body, columns=uniq)
     return pd.DataFrame(rows)
+
+
+def table_to_tsv(payload: Dict[str, Any]) -> str:
+    """엑셀·메모장에 그대로 붙일 수 있는 탭 구분 텍스트."""
+    rows = table_to_rows(payload)
+    return "\n".join(
+        "\t".join(c.replace("\t", " ").replace("\r", "").replace("\n", " ") for c in row) for row in rows
+    )
+
+
+def apply_values(payload: Dict[str, Any], rows: List[List[str]]) -> Dict[str, Any]:
+    """편집한 값을 그리드에 되돌려 넣는다 (서식·병합은 그대로 유지)."""
+    grid = payload.get("grid") or []
+    for r, row in enumerate(grid):
+        if r >= len(rows):
+            break
+        for c, cell in enumerate(row):
+            if cell is None or c >= len(rows[r]):
+                continue
+            new = rows[r][c]
+            cell["v"] = "" if new is None else str(new)
+    payload["grid"] = grid
+    return payload
 
 
 def table_to_csv_bytes(payload: Dict[str, Any]) -> bytes:

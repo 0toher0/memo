@@ -78,11 +78,31 @@
   function setHeight() {
     post({ type: "streamlit:setFrameHeight", height: document.body.scrollHeight + 10 });
   }
+  // Python 쪽에서 넘겨주는 옵션 ("auto" | "image")
+  var forceMode = "auto";
+
   post({ type: "streamlit:componentReady", apiVersion: 1 });
   setHeight();
   window.addEventListener("message", function (e) {
-    if (e.data && e.data.type === "streamlit:render") setHeight();
+    if (e.data && e.data.type === "streamlit:render") {
+      try {
+        var a = e.data.args || {};
+        if (a.mode) forceMode = a.mode;
+        applyHint();
+      } catch (err) {}
+      setHeight();
+    }
   });
+  function hintEl() {
+    var h = document.getElementById("hint");
+    if (!h) { zone.innerHTML = HINT; h = document.getElementById("hint"); }
+    return h;
+  }
+  function applyHint() {
+    hintEl().innerHTML = (forceMode === "image")
+      ? "🖼️ <b>이미지로 붙이기</b> 모드 — Ctrl+V 하면 화면 그림으로 저장됩니다."
+      : "📋 여기를 클릭하고 <b>Ctrl+V</b> — 엑셀 표는 <b>표 서식 그대로</b>, 화면 캡쳐는 <b>이미지</b>로 붙습니다.";
+  }
   window.addEventListener("resize", setHeight);
 
   function say(msg, cls) {
@@ -92,6 +112,7 @@
   }
   function resetZone() {
     zone.innerHTML = HINT;
+    applyHint();
     setHeight();
   }
 
@@ -290,7 +311,9 @@
     var cd = e.clipboardData || window.clipboardData;
     if (!cd) { say("클립보드를 읽을 수 없습니다.", "err"); return; }
 
-    // 1) 이미지 (화면 캡쳐, PPT 도형/차트 복사 등)
+    // 클립보드에 뭐가 들어있는지 먼저 모아둔다.
+    // ⚠️ 엑셀은 셀 범위를 복사해도 클립보드에 '그림'을 같이 넣는다.
+    //    그래서 이미지를 먼저 보면 표가 통째로 그림이 돼버린다 → 표를 항상 먼저 본다.
     var file = null;
     if (cd.items) {
       for (var i = 0; i < cd.items.length; i++) {
@@ -301,10 +324,17 @@
         }
       }
     }
-    if (file) {
+
+    var html = "";
+    try { html = cd.getData("text/html") || ""; } catch (err) { html = ""; }
+    var plain = "";
+    try { plain = cd.getData("text/plain") || ""; } catch (err2) { plain = ""; }
+
+    function pasteImage() {
+      if (!file) return false;
       if (file.size > MAX_IMAGE_BYTES) {
         say("이미지가 너무 큽니다 (" + Math.round(file.size / 1048576) + "MB). 12MB 이하로 잘라서 붙여넣어 주세요.", "err");
-        return;
+        return true;
       }
       var fr = new FileReader();
       fr.onload = function () {
@@ -327,15 +357,13 @@
       };
       fr.onerror = function () { say("이미지를 읽지 못했습니다.", "err"); };
       fr.readAsDataURL(file);
-      return;
+      return true;
     }
 
-    // 2) 서식 있는 HTML (엑셀 표 / Word / PPT 텍스트)
-    var html = "";
-    try { html = cd.getData("text/html") || ""; } catch (err) { html = ""; }
-    var plain = "";
-    try { plain = cd.getData("text/plain") || ""; } catch (err2) { plain = ""; }
+    // 사용자가 '이미지로 붙이기'를 고른 경우에만 이미지를 먼저 본다.
+    if (forceMode === "image" && pasteImage()) return;
 
+    // 1) 표 (엑셀 셀 범위 / 워드·PPT 안의 표) — 최우선
     if (html) {
       stage.innerHTML = html;                  // 스타일이 적용된 상태로 렌더 (측정용)
       var table = stage.querySelector("table");
@@ -354,7 +382,14 @@
           return;
         }
       }
-      // 표가 아니면 서식 텍스트로
+      stage.innerHTML = "";
+    }
+
+    // 2) 표가 아닌데 그림이 있으면 그림 (화면 캡쳐, PPT 도형·차트 복사 등)
+    if (pasteImage()) return;
+
+    // 3) 서식 있는 텍스트 (워드 문단, PPT 텍스트 상자 등)
+    if (html) {
       var box = document.createElement("div");
       box.innerHTML = html;
       stage.appendChild(box);
@@ -370,7 +405,7 @@
       }
     }
 
-    // 3) TSV (엑셀에서 복사했지만 HTML이 없는 경우) → 표로 복원
+    // 4) TSV (엑셀에서 복사했지만 HTML이 없는 경우) → 표로 복원
     if (plain && plain.indexOf("\t") >= 0) {
       var lines = plain.replace(/\r/g, "").split("\n");
       while (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -387,7 +422,7 @@
       return;
     }
 
-    // 4) 일반 텍스트
+    // 5) 일반 텍스트
     if (plain.trim()) {
       setValue({ uid: newUid(), kind: "text", text: plain });
       say("📄 텍스트 붙여넣기 완료", "ok");
